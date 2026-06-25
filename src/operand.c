@@ -32,8 +32,16 @@ int operand_format(const operand_t *op, char *buf, size_t bufsize) {
             if (op->data.reg_shifted.amount == 0 && op->data.reg_shifted.shift == SHIFT_LSL) {
                 return snprintf(buf, bufsize, "%s", reg);
             }
+            if (op->data.reg_shifted.amount == 0 && op->data.reg_shifted.shift == SHIFT_ROR) {
+                return snprintf(buf, bufsize, "%s, rrx", reg);
+            }
             const char *shift = shift_names[op->data.reg_shifted.shift];
-            return snprintf(buf, bufsize, "%s, %s #%u", reg, shift, op->data.reg_shifted.amount);
+            uint32_t amount = op->data.reg_shifted.amount;
+            if (amount == 0 && (op->data.reg_shifted.shift == SHIFT_LSR ||
+                                op->data.reg_shifted.shift == SHIFT_ASR)) {
+                amount = 32;
+            }
+            return snprintf(buf, bufsize, "%s, %s #%u", reg, shift, amount);
         }
         
         case OPERAND_REGISTER_REGISTER_SHIFTED: {
@@ -86,4 +94,3 @@ operand_t operand_parse_reg(uint32_t instr) {
     
     return op;
 }
-
