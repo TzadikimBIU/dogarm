@@ -1,7 +1,7 @@
 #include "decode.h"
 #include "operand.h"
+#include <inttypes.h>
 #include <stdio.h>
-#include <string.h>
 
 #define ARM_COND_MASK     0xf0000000
 #define ARM_COND_SHIFT    28
@@ -15,6 +15,12 @@
 #define ARM_RM_MASK       0x0000000f
 #define ARM_I_MASK        0x02000000
 #define ARM_I_SHIFT       25
+#define ARM_MULTIPLY_MASK       0x0fc000f0
+#define ARM_MULTIPLY_BITS       0x00000090
+#define ARM_MULTIPLY_LONG_MASK  0x0f8000f0
+#define ARM_MULTIPLY_LONG_BITS  0x00800090
+#define ARM_SWAP_MASK           0x0fb00ff0
+#define ARM_SWAP_BITS           0x01000090
 
 static const char *cond_codes[] = {
     "eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc",
@@ -44,47 +50,42 @@ static int32_t sign_extend_24(uint32_t val) {
 }
 
 instr_type_t decode_instruction_type(uint32_t instr) {
-    uint32_t cond = (instr >> 28) & 0xf;
     uint32_t bits_27_26 = (instr >> 26) & 3;
+    uint32_t bit_25 = (instr >> 25) & 1;
+    uint32_t bits_27_24 = (instr >> 24) & 0xf;
     uint32_t bits_25_20 = (instr >> 20) & 0x3f;
+    uint32_t opcode = (instr & ARM_OPCODE_MASK) >> ARM_OPCODE_SHIFT;
+    uint32_t s = (instr & ARM_S_MASK) >> 20;
     
     if (bits_27_26 == 0) {
+        if ((instr & ARM_MULTIPLY_LONG_MASK) == ARM_MULTIPLY_LONG_BITS) {
+            return INSTR_TYPE_MULTIPLY_LONG;
+        }
+        if ((instr & ARM_MULTIPLY_MASK) == ARM_MULTIPLY_BITS) {
+            return INSTR_TYPE_MULTIPLY;
+        }
+        if ((instr & ARM_SWAP_MASK) == ARM_SWAP_BITS) {
+            return INSTR_TYPE_SWAP;
+        }
         if ((bits_25_20 & 0x30) == 0x10 && (instr & 0x0ff00ff0) == 0x01200000) {
             return INSTR_TYPE_PSR_TRANSFER;
         }
-        if ((bits_25_20 & 0x30) == 0x00 && (bits_25_20 & 0x0f) == 9) {
-            return INSTR_TYPE_MULTIPLY;
-        }
-        if ((bits_25_20 & 0x30) == 0x10 && (bits_25_20 & 0x0f) == 9) {
-            return INSTR_TYPE_MULTIPLY_LONG;
-        }
-        if ((bits_25_20 & 0x30) == 0x10 && (bits_25_20 & 0x0f) == 0) {
-            if ((instr & 0x0f00) == 0) {
-                return INSTR_TYPE_UNDEFINED;
-            }
-            if ((instr & 0x0000f000) == 0 && (instr & 0x0ff00ff0) == 0x01000090) {
-                return INSTR_TYPE_SWAP;
-            }
+        if (opcode >= 8 && opcode <= 11 && !s) {
+            return INSTR_TYPE_UNDEFINED;
         }
         return INSTR_TYPE_DATA_PROC;
     } else if (bits_27_26 == 1) {
         return INSTR_TYPE_SINGLE_DATA_TRANSFER;
     } else if (bits_27_26 == 2) {
-        if ((bits_25_20 & 0x20) == 0) {
+        if (bit_25) {
             return INSTR_TYPE_BRANCH;
         }
         return INSTR_TYPE_BLOCK_DATA_TRANSFER;
     } else if (bits_27_26 == 3) {
-        if ((bits_25_20 & 0x20) == 0) {
-            if (cond == 0xf) {
-                return INSTR_TYPE_SOFTWARE_INTERRUPT;
-            }
-            return INSTR_TYPE_COPROCESSOR;
+        if (bits_27_24 == 0xf) {
+            return INSTR_TYPE_SOFTWARE_INTERRUPT;
         }
-        if (cond != 0xf) {
-            return INSTR_TYPE_COPROCESSOR;
-        }
-        return INSTR_TYPE_UNDEFINED;
+        return INSTR_TYPE_COPROCESSOR;
     }
     
     return INSTR_TYPE_UNDEFINED;
@@ -100,6 +101,7 @@ static int disasm_data_proc(const instruction_t *instr, char *output, size_t out
     
     const char *opcode_str = dp_opcodes[opcode];
     const char *cond_str = get_cond_suffix(instr->cond);
+    const char *flags_str = (s && !(opcode >= 8 && opcode <= 11)) ? "s" : "";
     const char *rd_str = get_reg_name(rd);
     char op2_buf[64];
     operand_t op2;
@@ -118,17 +120,13 @@ static int disasm_data_proc(const instruction_t *instr, char *output, size_t out
         len = snprintf(output, outsize, "%s%s %s, %s", opcode_str, cond_str, rn_str, op2_buf);
     } else {
         if (opcode == 13 || opcode == 15) {
-            len = snprintf(output, outsize, "%s%s %s, %s", opcode_str, cond_str, rd_str, op2_buf);
+            len = snprintf(output, outsize, "%s%s%s %s, %s", opcode_str, flags_str, cond_str, rd_str, op2_buf);
         } else {
             const char *rn_str = get_reg_name(rn);
-            len = snprintf(output, outsize, "%s%s %s, %s, %s", opcode_str, cond_str, rd_str, rn_str, op2_buf);
+            len = snprintf(output, outsize, "%s%s%s %s, %s, %s", opcode_str, flags_str, cond_str, rd_str, rn_str, op2_buf);
         }
     }
-    
-    if (s && instr->cond != 0xe) {
-        snprintf(output + len, outsize - len, "s");
-    }
-    
+
     return len;
 }
 
@@ -142,6 +140,7 @@ static int disasm_multiply(const instruction_t *instr, char *output, size_t outs
     uint32_t rm = raw & 0xf;
     
     const char *cond_str = get_cond_suffix(instr->cond);
+    const char *flags_str = s ? "s" : "";
     const char *rd_str = get_reg_name(rd);
     const char *rm_str = get_reg_name(rm);
     const char *rs_str = get_reg_name(rs);
@@ -150,13 +149,9 @@ static int disasm_multiply(const instruction_t *instr, char *output, size_t outs
     
     if (a) {
         const char *rn_str = get_reg_name(rn);
-        len = snprintf(output, outsize, "mla%s %s, %s, %s, %s", cond_str, rd_str, rm_str, rs_str, rn_str);
+        len = snprintf(output, outsize, "mla%s%s %s, %s, %s, %s", flags_str, cond_str, rd_str, rm_str, rs_str, rn_str);
     } else {
-        len = snprintf(output, outsize, "mul%s %s, %s, %s", cond_str, rd_str, rm_str, rs_str);
-    }
-    
-    if (s && instr->cond != 0xe) {
-        snprintf(output + len, outsize - len, "s");
+        len = snprintf(output, outsize, "mul%s%s %s, %s, %s", flags_str, cond_str, rd_str, rm_str, rs_str);
     }
     
     return len;
@@ -224,19 +219,21 @@ static int disasm_single_data_transfer(const instruction_t *instr, char *output,
 static int disasm_branch(const instruction_t *instr, char *output, size_t outsize) {
     uint32_t raw = instr->raw;
     uint32_t l = (raw >> 24) & 1;
-    int32_t offset = sign_extend_24(raw & 0x00ffffff) << 2;
+    int32_t offset = sign_extend_24(raw & 0x00ffffff) * 4;
+    uint32_t target = instr->address + 8u + (uint32_t)offset;
     
     const char *cond_str = get_cond_suffix(instr->cond);
     const char *op_str = l ? "bl" : "b";
     
-    return snprintf(output, outsize, "%s%s #%d", op_str, cond_str, offset);
+    return snprintf(output, outsize, "%s%s 0x%08" PRIx32, op_str, cond_str, target);
 }
 
 static int disasm_software_interrupt(const instruction_t *instr, char *output, size_t outsize) {
     uint32_t raw = instr->raw;
     uint32_t comment = raw & 0x00ffffff;
+    const char *cond_str = get_cond_suffix(instr->cond);
     
-    return snprintf(output, outsize, "swi #%u", comment);
+    return snprintf(output, outsize, "svc%s #%u", cond_str, comment);
 }
 
 static int disasm_block_data_transfer(const instruction_t *instr, char *output, size_t outsize) {
@@ -258,15 +255,23 @@ static int disasm_block_data_transfer(const instruction_t *instr, char *output, 
     else if (!p && u) mode_str = "ia";
     else mode_str = "da";
     
-    char reg_list_buf[256] = "";
+    char reg_list_buf[128] = "";
+    size_t used = 0;
     int first = 1;
     
-    for (int i = 0; i < 16; i++) {
-        if (reg_list & (1 << i)) {
-            if (!first) {
-                strcat(reg_list_buf, ", ");
+    for (uint32_t i = 0; i < 16; i++) {
+        if (reg_list & (1u << i)) {
+            size_t remaining = sizeof(reg_list_buf) - used;
+            int written = snprintf(reg_list_buf + used, remaining, "%s%s",
+                                   first ? "" : ", ", get_reg_name(i));
+            if (written < 0) {
+                return written;
             }
-            strcat(reg_list_buf, get_reg_name(i));
+            if ((size_t)written >= remaining) {
+                used = sizeof(reg_list_buf) - 1u;
+                break;
+            }
+            used += (size_t)written;
             first = 0;
         }
     }
@@ -304,4 +309,3 @@ int decode_instruction(const instruction_t *instr, char *output, size_t outsize)
             return snprintf(output, outsize, ".word 0x%08x", instr->raw);
     }
 }
-

@@ -44,6 +44,19 @@ Pointer to the disassembly structure returned by `dogarm_disasm()`. It's safe to
 The build system generates both static and shared library artefacts:
 
 ```bash
+make
+make test
+```
+
+For the same strict build used by CI:
+
+```bash
+make ci
+```
+
+The legacy script remains available:
+
+```bash
 ./build.sh
 ```
 
@@ -80,5 +93,5 @@ echo "e3a00000 e1a05008" | xxd -r -p > instructions.bin
 ```
 
 **Limitations:**
-- Address offsets are relative to file start and not actual load addresses. For position dependent analysis you can compute actual addresses from ELF base addresses or runtime addresses
-- Undefined/uunsupported instruction encodings are emitted as `.word` directives w/ raw hex values
+- Instruction addresses and branch targets are relative to file start, not actual load addresses. For position dependent analysis you can compute actual addresses from ELF base addresses or runtime addresses
+- Undefined/unsupported instruction encodings are emitted as `.word` directives w/ raw hex values

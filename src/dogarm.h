@@ -11,7 +11,7 @@ extern "C" {
 typedef struct {
     uint32_t address;
     uint32_t instruction;
-    char disasm_instr[64];
+    char disasm_instr[128];
 } dogarm_instruction_t;
 
 typedef struct {
@@ -28,4 +28,3 @@ void dogarm_free(dogarm_disasm_t *disassembly);
 #endif
 
 #endif
-
