@@ -21,6 +21,19 @@
 #define ARM_MULTIPLY_LONG_BITS  0x00800090
 #define ARM_SWAP_MASK           0x0fb00ff0
 #define ARM_SWAP_BITS           0x01000090
+#define ARM_BRANCH_EXCHANGE_MASK 0x0ffffff0
+#define ARM_BX_BITS              0x012fff10
+#define ARM_BLX_BITS             0x012fff30
+#define ARM_HALFWORD_MASK        0x0e000090
+#define ARM_HALFWORD_BITS        0x00000090
+#define ARM_MRS_MASK             0x0fbf0fff
+#define ARM_MRS_BITS             0x010f0000
+#define ARM_MSR_REG_MASK         0x0fb0fff0
+#define ARM_MSR_REG_BITS         0x0120f000
+#define ARM_MSR_IMM_MASK         0x0fb0f000
+#define ARM_MSR_IMM_BITS         0x0320f000
+#define ARM_WIDE_IMM_MASK        0x0fb00000
+#define ARM_WIDE_IMM_BITS        0x03000000
 
 static const char *cond_codes[] = {
     "eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc",
@@ -49,6 +62,14 @@ static int32_t sign_extend_24(uint32_t val) {
     return ((int32_t)(val << 8)) >> 8;
 }
 
+static int arch_at_least(const instruction_t *instr, dogarm_arch_t arch) {
+    return instr->arch >= arch;
+}
+
+static int disasm_word(const instruction_t *instr, char *output, size_t outsize) {
+    return snprintf(output, outsize, ".word 0x%08" PRIx32, instr->raw);
+}
+
 instr_type_t decode_instruction_type(uint32_t instr) {
     uint32_t bits_27_26 = (instr >> 26) & 3;
     uint32_t bit_25 = (instr >> 25) & 1;
@@ -58,6 +79,10 @@ instr_type_t decode_instruction_type(uint32_t instr) {
     uint32_t s = (instr & ARM_S_MASK) >> 20;
     
     if (bits_27_26 == 0) {
+        if ((instr & ARM_BRANCH_EXCHANGE_MASK) == ARM_BX_BITS ||
+            (instr & ARM_BRANCH_EXCHANGE_MASK) == ARM_BLX_BITS) {
+            return INSTR_TYPE_BRANCH_EXCHANGE;
+        }
         if ((instr & ARM_MULTIPLY_LONG_MASK) == ARM_MULTIPLY_LONG_BITS) {
             return INSTR_TYPE_MULTIPLY_LONG;
         }
@@ -66,6 +91,17 @@ instr_type_t decode_instruction_type(uint32_t instr) {
         }
         if ((instr & ARM_SWAP_MASK) == ARM_SWAP_BITS) {
             return INSTR_TYPE_SWAP;
+        }
+        if ((instr & ARM_HALFWORD_MASK) == ARM_HALFWORD_BITS && (((instr >> 5) & 3u) != 0)) {
+            return INSTR_TYPE_HALFWORD_DATA_TRANSFER;
+        }
+        if ((instr & ARM_MRS_MASK) == ARM_MRS_BITS ||
+            (instr & ARM_MSR_REG_MASK) == ARM_MSR_REG_BITS ||
+            (instr & ARM_MSR_IMM_MASK) == ARM_MSR_IMM_BITS) {
+            return INSTR_TYPE_PSR_TRANSFER;
+        }
+        if ((instr & ARM_WIDE_IMM_MASK) == ARM_WIDE_IMM_BITS) {
+            return INSTR_TYPE_WIDE_IMMEDIATE;
         }
         if ((bits_25_20 & 0x30) == 0x10 && (instr & 0x0ff00ff0) == 0x01200000) {
             return INSTR_TYPE_PSR_TRANSFER;
@@ -157,6 +193,192 @@ static int disasm_multiply(const instruction_t *instr, char *output, size_t outs
     return len;
 }
 
+static int disasm_multiply_long(const instruction_t *instr, char *output, size_t outsize) {
+    if (!arch_at_least(instr, DOGARM_ARCH_ARMV4T)) {
+        return disasm_word(instr, output, outsize);
+    }
+
+    uint32_t raw = instr->raw;
+    uint32_t u = (raw >> 22) & 1;
+    uint32_t a = (raw >> 21) & 1;
+    uint32_t s = (raw >> 20) & 1;
+    uint32_t rd_hi = (raw >> 16) & 0xf;
+    uint32_t rd_lo = (raw >> 12) & 0xf;
+    uint32_t rs = (raw >> 8) & 0xf;
+    uint32_t rm = raw & 0xf;
+    const char *cond_str = get_cond_suffix(instr->cond);
+    const char *flags_str = s ? "s" : "";
+    const char *op_str;
+
+    if (u) {
+        op_str = a ? "smlal" : "smull";
+    } else {
+        op_str = a ? "umlal" : "umull";
+    }
+
+    return snprintf(output, outsize, "%s%s%s %s, %s, %s, %s",
+                    op_str, flags_str, cond_str,
+                    get_reg_name(rd_lo), get_reg_name(rd_hi),
+                    get_reg_name(rm), get_reg_name(rs));
+}
+
+static int disasm_swap(const instruction_t *instr, char *output, size_t outsize) {
+    if (!arch_at_least(instr, DOGARM_ARCH_ARMV4T)) {
+        return disasm_word(instr, output, outsize);
+    }
+
+    uint32_t raw = instr->raw;
+    uint32_t b = (raw >> 22) & 1;
+    uint32_t rn = (raw >> 16) & 0xf;
+    uint32_t rd = (raw >> 12) & 0xf;
+    uint32_t rm = raw & 0xf;
+
+    return snprintf(output, outsize, "swp%s%s %s, %s, [%s]",
+                    b ? "b" : "", get_cond_suffix(instr->cond),
+                    get_reg_name(rd), get_reg_name(rm), get_reg_name(rn));
+}
+
+static int disasm_branch_exchange(const instruction_t *instr, char *output, size_t outsize) {
+    uint32_t raw = instr->raw;
+    uint32_t link = (raw >> 5) & 1;
+    dogarm_arch_t min_arch = link ? DOGARM_ARCH_ARMV5 : DOGARM_ARCH_ARMV4T;
+    if (!arch_at_least(instr, min_arch)) {
+        return disasm_word(instr, output, outsize);
+    }
+
+    return snprintf(output, outsize, "%s%s %s",
+                    link ? "blx" : "bx", get_cond_suffix(instr->cond),
+                    get_reg_name(raw & 0xf));
+}
+
+static uint32_t halfword_immediate_offset(uint32_t raw) {
+    return ((raw >> 4) & 0xf0u) | (raw & 0x0fu);
+}
+
+static int format_halfword_address(uint32_t raw, char *buf, size_t bufsize) {
+    uint32_t immediate = (raw >> 22) & 1;
+    uint32_t p = (raw >> 24) & 1;
+    uint32_t u = (raw >> 23) & 1;
+    uint32_t w = (raw >> 21) & 1;
+    uint32_t rn = (raw >> 16) & 0xf;
+    char offset_buf[32];
+
+    if (immediate) {
+        uint32_t offset = halfword_immediate_offset(raw);
+        if (offset == 0) {
+            snprintf(offset_buf, sizeof(offset_buf), "#0");
+        } else {
+            snprintf(offset_buf, sizeof(offset_buf), "#%s%" PRIu32, u ? "" : "-", offset);
+        }
+    } else {
+        snprintf(offset_buf, sizeof(offset_buf), "%s%s", u ? "" : "-", get_reg_name(raw & 0xf));
+    }
+
+    if (p) {
+        if (immediate && halfword_immediate_offset(raw) == 0) {
+            return snprintf(buf, bufsize, "[%s]%s", get_reg_name(rn), w ? "!" : "");
+        }
+        return snprintf(buf, bufsize, "[%s, %s]%s", get_reg_name(rn), offset_buf, w ? "!" : "");
+    }
+
+    return snprintf(buf, bufsize, "[%s], %s", get_reg_name(rn), offset_buf);
+}
+
+static int disasm_halfword_data_transfer(const instruction_t *instr, char *output, size_t outsize) {
+    uint32_t raw = instr->raw;
+    uint32_t l = (raw >> 20) & 1;
+    uint32_t rd = (raw >> 12) & 0xf;
+    uint32_t sh = (raw >> 5) & 3;
+    const char *op_str;
+    char addr_buf[64];
+
+    if (sh == 1) {
+        op_str = l ? "ldrh" : "strh";
+    } else if (sh == 2) {
+        op_str = l ? "ldrsb" : "ldrd";
+    } else if (sh == 3) {
+        op_str = l ? "ldrsh" : "strd";
+    } else {
+        return disasm_word(instr, output, outsize);
+    }
+
+    if (!arch_at_least(instr, (!l && sh != 1) ? DOGARM_ARCH_ARMV5 : DOGARM_ARCH_ARMV4T)) {
+        return disasm_word(instr, output, outsize);
+    }
+
+    format_halfword_address(raw, addr_buf, sizeof(addr_buf));
+    return snprintf(output, outsize, "%s%s %s, %s",
+                    op_str, get_cond_suffix(instr->cond), get_reg_name(rd), addr_buf);
+}
+
+static int format_psr_name(uint32_t spsr, uint32_t fields, int with_fields,
+                           char *buf, size_t bufsize) {
+    const char *name = spsr ? "spsr" : "cpsr";
+    char suffix[5];
+    size_t used = 0;
+
+    if (!with_fields) {
+        return snprintf(buf, bufsize, "%s", name);
+    }
+
+    if (fields & 8u) suffix[used++] = 'f';
+    if (fields & 4u) suffix[used++] = 's';
+    if (fields & 2u) suffix[used++] = 'x';
+    if (fields & 1u) suffix[used++] = 'c';
+    suffix[used] = '\0';
+
+    return snprintf(buf, bufsize, "%s_%s", name, suffix);
+}
+
+static int disasm_psr_transfer(const instruction_t *instr, char *output, size_t outsize) {
+    if (!arch_at_least(instr, DOGARM_ARCH_ARMV4T)) {
+        return disasm_word(instr, output, outsize);
+    }
+
+    uint32_t raw = instr->raw;
+    char psr_buf[16];
+
+    if ((raw & ARM_MRS_MASK) == ARM_MRS_BITS) {
+        uint32_t rd = (raw >> 12) & 0xf;
+        format_psr_name((raw >> 22) & 1, 0, 0, psr_buf, sizeof(psr_buf));
+        return snprintf(output, outsize, "mrs%s %s, %s",
+                        get_cond_suffix(instr->cond), get_reg_name(rd), psr_buf);
+    }
+
+    if ((raw & ARM_MSR_REG_MASK) == ARM_MSR_REG_BITS) {
+        uint32_t fields = (raw >> 16) & 0xf;
+        format_psr_name((raw >> 22) & 1, fields, 1, psr_buf, sizeof(psr_buf));
+        return snprintf(output, outsize, "msr%s %s, %s",
+                        get_cond_suffix(instr->cond), psr_buf, get_reg_name(raw & 0xf));
+    }
+
+    if ((raw & ARM_MSR_IMM_MASK) == ARM_MSR_IMM_BITS) {
+        uint32_t fields = (raw >> 16) & 0xf;
+        operand_t op = operand_parse_imm(raw);
+        char imm_buf[32];
+        format_psr_name((raw >> 22) & 1, fields, 1, psr_buf, sizeof(psr_buf));
+        operand_format(&op, imm_buf, sizeof(imm_buf));
+        return snprintf(output, outsize, "msr%s %s, %s",
+                        get_cond_suffix(instr->cond), psr_buf, imm_buf);
+    }
+
+    return disasm_word(instr, output, outsize);
+}
+
+static int disasm_wide_immediate(const instruction_t *instr, char *output, size_t outsize) {
+    if (!arch_at_least(instr, DOGARM_ARCH_ARMV7)) {
+        return disasm_word(instr, output, outsize);
+    }
+
+    uint32_t raw = instr->raw;
+    uint32_t rd = (raw >> 12) & 0xf;
+    uint32_t imm16 = ((raw >> 4) & 0xf000u) | (raw & 0x0fffu);
+    const char *op_str = ((raw >> 22) & 1u) ? "movt" : "movw";
+
+    return snprintf(output, outsize, "%s%s %s, #%" PRIu32,
+                    op_str, get_cond_suffix(instr->cond), get_reg_name(rd), imm16);
+}
+
 static int disasm_single_data_transfer(const instruction_t *instr, char *output, size_t outsize) {
     uint32_t raw = instr->raw;
     uint32_t i = (raw >> 25) & 1;
@@ -224,6 +446,10 @@ static int disasm_branch(const instruction_t *instr, char *output, size_t outsiz
     
     const char *cond_str = get_cond_suffix(instr->cond);
     const char *op_str = l ? "bl" : "b";
+
+    if (instr->branch_format == DOGARM_BRANCH_OFFSET) {
+        return snprintf(output, outsize, "%s%s #%d", op_str, cond_str, offset);
+    }
     
     return snprintf(output, outsize, "%s%s 0x%08" PRIx32, op_str, cond_str, target);
 }
@@ -286,9 +512,21 @@ int decode_instruction(const instruction_t *instr, char *output, size_t outsize)
             
         case INSTR_TYPE_MULTIPLY:
             return disasm_multiply(instr, output, outsize);
+
+        case INSTR_TYPE_MULTIPLY_LONG:
+            return disasm_multiply_long(instr, output, outsize);
+
+        case INSTR_TYPE_SWAP:
+            return disasm_swap(instr, output, outsize);
+
+        case INSTR_TYPE_BRANCH_EXCHANGE:
+            return disasm_branch_exchange(instr, output, outsize);
             
         case INSTR_TYPE_SINGLE_DATA_TRANSFER:
             return disasm_single_data_transfer(instr, output, outsize);
+
+        case INSTR_TYPE_HALFWORD_DATA_TRANSFER:
+            return disasm_halfword_data_transfer(instr, output, outsize);
             
         case INSTR_TYPE_BRANCH:
             return disasm_branch(instr, output, outsize);
@@ -298,14 +536,16 @@ int decode_instruction(const instruction_t *instr, char *output, size_t outsize)
             
         case INSTR_TYPE_BLOCK_DATA_TRANSFER:
             return disasm_block_data_transfer(instr, output, outsize);
-            
-        case INSTR_TYPE_MULTIPLY_LONG:
-        case INSTR_TYPE_SWAP:
+
         case INSTR_TYPE_PSR_TRANSFER:
-        case INSTR_TYPE_HALFWORD_DATA_TRANSFER:
+            return disasm_psr_transfer(instr, output, outsize);
+
+        case INSTR_TYPE_WIDE_IMMEDIATE:
+            return disasm_wide_immediate(instr, output, outsize);
+
         case INSTR_TYPE_COPROCESSOR:
         case INSTR_TYPE_UNDEFINED:
         default:
-            return snprintf(output, outsize, ".word 0x%08x", instr->raw);
+            return disasm_word(instr, output, outsize);
     }
 }

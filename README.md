@@ -2,15 +2,15 @@
   <img src="images/image.png" alt="dogarm" />
 </div>
 
-By James.
+By James
 
 # dogarm
 
-dogarm is an ARM ISA disassembly engine that does real time decoding of 32 bit ARM opcodes into human readable assembly mnemonics. The library implements instruction format parsing, operand extraction and encoding translation for the ARM architectures unified instruction set and supports data processing, memory transfer, branch and control flow operations w/ full conditional execution semantics
+dogarm is an ARM ISA disassembly engine that does real time decoding of 32 bit ARM opcodes into human readable assembly mnemonics The library implements instruction format parsing, operand extraction and encoding translation for the ARM architectures unified instruction set and supports data processing, memory transfer, branch and control flow operations w/ full conditional execution semantics
 
-The disassembler uses a decoder pipeline implementing instruction classification via bitfield pattern matching that's followed by operand parsing using ARMs second operand (shifter operand) semantics. The decoder handles immediate value rotation, register shifts as well as addressing mode interpretation for load/store operations
+The disassembler uses a decoder pipeline implementing instruction classification via bitfield pattern matching that's followed by operand parsing using ARMs second operand (shifter operand) semantics The decoder handles immediate value rotation, register shifts as well as addressing mode interpretation for load/store operations
 
-The disassembler implements instruction classification through hierarchical bitfield pattern matching to enable dispatch to specialised decoding routines. Operand extraction handles ARM's addressing modes.
+The disassembler implements instruction classification through hierarchical bitfield pattern matching to enable dispatch to specialised decoding routines Operand extraction handles ARM's addressing modes
 
 The decoder pipeline uses instruction type identification by examining bits [27:26] and [25:20] then dispatches to format handlers that extract operands and generate mnemonic strings following standard ARM assembly syntax conventions
 
@@ -18,7 +18,7 @@ The decoder pipeline uses instruction type identification by examining bits [27:
 
 ### `dogarm_disasm_t *dogarm_disasm(const void *buffer, const size_t nbytes)`
 
-Decodes a contiguous stream of ARM 32 bit little endian opcodes and transforms raw instruction words into canonical assembly mnemonics w/ full operand deconstruction. Internally this performs strict instruction boundary checks and validates stream alignment as well as walking the opcode sequence with bitfield pattern matching. For each opcode the decoder pipeline issues micro parsers for operand extraction, field decoding and encoding class translation then emitting a symbolic disassembly inclusive of shifter operands, addressing modes and conditional execution annotations
+Decodes a contiguous stream of ARM 32 bit little endian opcodes and transforms raw instruction words into canonical assembly mnemonics w/ full operand deconstruction Internally this performs strict instruction boundary checks and validates stream alignment as well as walking the opcode sequence with bitfield pattern matching For each opcode the decoder pipeline issues micro parsers for operand extraction, field decoding and encoding class translation then emitting a symbolic disassembly inclusive of shifter operands, addressing modes and conditional execution annotations
 
 **Parameters:**
 
@@ -30,14 +30,45 @@ Decodes a contiguous stream of ARM 32 bit little endian opcodes and transforms r
 
 **Returns:**
 
-Pointer to a `dogarm_disasm_t` struture containing decoded instruction metadata and formatted disassembly strings. Returns `NULL` if allocation fails or input parameters are invalid
+Pointer to a `dogarm_disasm_t` struture containing decoded instruction metadata and formatted disassembly strings Returns `NULL` if allocation fails or input parameters are invalid
+
+### `dogarm_options_t dogarm_default_options(void)`
+
+Returns the default decoder configuration:
+
+- little endian input
+- ARMv7 decode coverage
+- base address `0`
+- branch operands rendered as resolved target addresses
+- unified ARM syntax
+
+### `dogarm_disasm_t *dogarm_disasm_with_options(const void *buffer, const size_t nbytes, const dogarm_options_t *options)`
+
+Decodes an instruction stream using explicit decoder options This API is useful when the input buffer comes from a mapped image, big endian dump, older architecture target, or caller that wants branch immediates instead of resolved target addresses
+
+`dogarm_options_t` fields:
+
+`base_address`
+Address assigned to the first instruction Branch target rendering uses this address
+
+`endian`
+`DOGARM_ENDIAN_LITTLE` or `DOGARM_ENDIAN_BIG`
+
+`arch`
+`DOGARM_ARCH_ARMV4T`, `DOGARM_ARCH_ARMV5`, `DOGARM_ARCH_ARMV6`, or `DOGARM_ARCH_ARMV7` Encodings outside the selected architecture are emitted as `.word`
+
+`branch_format`
+`DOGARM_BRANCH_TARGET` renders resolved PC-relative targets `DOGARM_BRANCH_OFFSET` renders the signed branch displacement
+
+`syntax`
+Reserved for syntax selection `DOGARM_SYNTAX_UNIFIED` is currently supported
 
 ### `void dogarm_free(dogarm_disasm_t *disassembly)`
 
 This deallocates memory associated w/ a disassembly result structure releasing all internal buffers and metadata allocated during the disassembly process
 
 `disassembly`  
-Pointer to the disassembly structure returned by `dogarm_disasm()`. It's safe to pass `NULL`
+Pointer to the disassembly structure returned by `dogarm_disasm()` It's safe to pass `NULL`
 
 ### Building
 
@@ -48,11 +79,13 @@ make
 make test
 ```
 
-For the same strict build used by CI:
+For the same strict build used by ci:
 
 ```bash
 make ci
 ```
+
+`make ci` runs the warning-as-error build, the static regression tests, the objdump-backed differential smoke test when ARM binutils are available, and an ASan/UBSan instrumentation pass
 
 The legacy script remains available:
 
@@ -62,10 +95,23 @@ The legacy script remains available:
 
 **Usage:**
 ```bash
-./build/dogarm-disasm <binary_file>
+./build/dogarm-disasm [options] <binary_file>
 ```
 
-The utility reads a contiguous byte stream from the specified file that validates instruction boundary alignment (requiring word-aligned 32-bit opcodes) and performs full instruction decoding with operand extraction. Output is formatted as tabular disassembly listing showing virtual addresses, raw opcode encodings and canonical ARM assembly mnemonics
+The utility reads a contiguous byte stream from the specified file that validates instruction boundary alignment (requiring word-aligned 32-bit opcodes) and performs full instruction decoding with operand extraction Output is formatted as tabular disassembly listing showing virtual addresses, raw opcode encodings and canonical ARM assembly mnemonics
+
+**Options:**
+```bash
+--base 0x8000
+--endian little|big
+--arch armv4t|armv5|armv6|armv7
+--branch-format target|offset
+--format table|plain
+--no-header
+--strict
+```
+
+The decoder currently handles data processing instructions, multiply and multiply long, PSR transfers, MOVW/MOVT, single data transfers, halfword/signed/dual transfers, block transfers, branch and branch exchange, software interrupts, and swap instructions Unsupported coprocessor or architecture-specific encodings are emitted as `.word`
 
 **Raw Binary Files (ready to disassemble):**
 ```bash
@@ -79,7 +125,7 @@ If you have a compiled ARM ELF binary, extract the executable code section first
 objcopy -O binary --only-section=.text your_program.elf code-section.bin
 ./build/dogarm-disasm code-section.bin
 ```
-Note: `objcopy` is only needed when extracting from ELF files. Raw binary files like `penguin.bin` can be disassembled directly.
+Note: `objcopy` is only needed when extracting from ELF files Raw binary files like `penguin.bin` can be disassembled directly
 
 **Memory Dumps:**
 ```bash
@@ -93,5 +139,5 @@ echo "e3a00000 e1a05008" | xxd -r -p > instructions.bin
 ```
 
 **Limitations:**
-- Instruction addresses and branch targets are relative to file start, not actual load addresses. For position dependent analysis you can compute actual addresses from ELF base addresses or runtime addresses
+- Instruction addresses and branch targets are relative to file start, not actual load addresses For position dependent analysis you can compute actual addresses from ELF base addresses or runtime addresses
 - Undefined/unsupported instruction encodings are emitted as `.word` directives w/ raw hex values
